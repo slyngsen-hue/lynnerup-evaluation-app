@@ -55,10 +55,16 @@
         @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
         .animate-fade-in { animation: fadeIn 0.4s ease-out forwards; }
         
-        /* Markdown Styles for AI Box */
-        .ai-content ul { list-style-type: disc; margin-left: 1.5rem; margin-bottom: 1rem; }
-        .ai-content li { margin-bottom: 0.5rem; }
-        .ai-content strong { color: #1e3a8a; }
+/* Markdown Styles for AI Box */
+.ai-content { color: #eff6ff; } /* Light blue-white for body text */
+.ai-content ul { list-style-type: disc; margin-left: 1.5rem; margin-bottom: 1rem; }
+.ai-content li { margin-bottom: 0.5rem; }
+
+/* CHANGED: Bold text is now White (was Navy Blue) */
+.ai-content strong { color: #ffffff; font-weight: bold; } 
+
+/* CHANGED: Headers are now Gold/Amber for readability */
+.ai-content h3 { font-size: 1.25rem; font-weight: bold; margin-top: 1.5rem; margin-bottom: 0.75rem; color: #fbbf24; }   
     </style>
 </head>
 <body class="text-gray-800 antialiased">
@@ -480,6 +486,7 @@ Problem-Solving,Sustainability of improvements made through problem-solving,No s
     </script>
 </body>
 </html>
+
 
 
 
