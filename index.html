@@ -1,447 +1,86 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Lynnerup & Ansell Evaluation Tool</title>
+const GEMINI_API_KEY = "AIzaSyCs9KgzezS2nl_n2oojGh-60i0QPRzNXoo"; // Ideally, move this to Script Properties for security
+
+function doPost(e) {
+  // Add lock to prevent race conditions
+  const lock = LockService.getScriptLock();
+  lock.tryLock(10000);
+
+  try {
+    const data = JSON.parse(e.postData.contents);
+
+    // --- ROUTE 1: AI ANALYSIS ---
+    if (data.action === "analyze") {
+      const analysis = callGemini(data.stats, data.clientName);
+      
+      // We must return JSON
+      return ContentService.createTextOutput(JSON.stringify({ result: "success", analysis: analysis }))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+
+    // --- ROUTE 2: SAVE DATA ---
+    const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
     
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    // Batch the append for speed
+    // (Ensure your sheet has headers: Timestamp, Client, Category, Question, Score)
+    const rows = data.answers.map(ans => [
+      new Date(),
+      data.clientName,
+      ans.category,
+      ans.question,
+      ans.score
+    ]);
 
-    <style>
-        /* --- BRANDING --- */
-        :root {
-            --brand-primary: #1e3a8a; /* Navy Blue */
-            --brand-secondary: #d97706; /* Gold/Amber */
-        }
+    if (rows.length > 0) {
+      sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
+    }
 
-        body {
-            font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
-            background-color: #f3f4f6;
-            min-height: 100vh;
-        }
+    return ContentService.createTextOutput(JSON.stringify({ result: "saved" }))
+      .setMimeType(ContentService.MimeType.JSON);
 
-        /* Background Handling */
-        .app-background {
-            position: fixed;
-            top: 0; left: 0; width: 100%; height: 100%;
-            background-image: url('20251027 - 9-16 background - Copy.png');
-            background-size: cover;
-            background-position: center;
-            opacity: 0.15;
-            z-index: -1;
-        }
+  } catch (err) {
+    return ContentService.createTextOutput(JSON.stringify({ result: "error", error: err.toString() }))
+      .setMimeType(ContentService.MimeType.JSON);
+  } finally {
+    lock.releaseLock();
+  }
+}
 
-        /* Custom UI Elements */
-        .btn-primary {
-            background-color: var(--brand-primary);
-            color: white;
-            transition: all 0.2s;
-        }
-        .btn-primary:hover { background-color: #172554; transform: translateY(-1px); }
-        .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+function callGemini(stats, client) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`;
+  
+  // Refined prompt for 4-7 bullets and specific insight
+  const prompt = `
+    You are a senior strategic partner at Lynnerup & Ansell. 
+    Review the following aggregate scores (scale 1-5) for our client "${client}".
+    
+    Data: ${JSON.stringify(stats)}
+    
+    Task: Provide a high-level executive summary of the organization's maturity.
+    
+    Format Guidelines:
+    1. Provide exactly 5-7 bullet points.
+    2. Focus specifically on the "Maturity of Performance Dialogues" and "Strategic Alignment".
+    3. Be direct, professional, and insightful. Do not use fluff.
+    4. Highlight the most critical gap and the strongest asset.
+    5. Output raw text (no markdown symbols like ##).
+  `;
 
-        .score-btn.selected {
-            background-color: var(--brand-primary);
-            color: white;
-            border-color: var(--brand-primary);
-            box-shadow: 0 4px 6px -1px rgba(30, 58, 138, 0.4);
-            transform: scale(1.02);
-        }
+  const payload = {
+    contents: [{ parts: [{ text: prompt }] }]
+  };
 
-        .chart-container { position: relative; height: 500px; width: 100%; }
-        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
-        .animate-fade-in { animation: fadeIn 0.4s ease-out forwards; }
-    </style>
-</head>
-<body class="text-gray-800 antialiased">
+  const options = {
+    method: "post",
+    contentType: "application/json",
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true
+  };
 
-    <div class="app-background"></div>
-
-    <div class="max-w-5xl mx-auto p-4 md:p-8 min-h-screen flex flex-col">
-        
-        <header class="flex flex-col items-center mb-8 pt-4">
-            <img src="la-logo.png" alt="Lynnerup & Ansell" class="h-24 mb-4 object-contain drop-shadow-sm" onerror="this.style.display='none'; document.getElementById('alt-logo').style.display='block'">
-            <div id="alt-logo" class="hidden text-2xl font-serif font-bold text-blue-900 mb-2">LYNNERUP & ANSELL</div>
-            <h1 class="text-2xl md:text-3xl font-bold text-slate-900 text-center tracking-tight">Strategic Evaluation Tool</h1>
-        </header>
-
-        <div id="screen-welcome" class="flex-1 flex flex-col items-center justify-center animate-fade-in">
-            <div class="bg-white rounded-xl shadow-xl p-8 w-full max-w-lg border border-gray-200 text-center">
-                <h2 class="text-xl font-bold text-slate-800 mb-2">New Evaluation</h2>
-                <p class="text-gray-500 mb-6 text-sm">Please identify the client or project for this session.</p>
-                
-                <div class="text-left mb-6">
-                    <label class="block text-xs font-bold text-gray-500 uppercase mb-1">Project / Client Name</label>
-                    <input type="text" id="clientNameInput" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-900 focus:outline-none" placeholder="e.g. CUNY Transformation Phase 1">
-                </div>
-
-                <button onclick="startEvaluation()" class="w-full btn-primary py-3 rounded-lg font-bold text-lg shadow-lg">
-                    Start Assessment <i class="fas fa-arrow-right ml-2"></i>
-                </button>
-            </div>
-        </div>
-
-        <div id="screen-app" class="hidden flex-1 flex flex-col animate-fade-in">
-            <div class="sticky top-2 z-30 bg-white/95 backdrop-blur shadow-md p-4 rounded-xl mb-8 border border-gray-100 ring-1 ring-black/5 flex justify-between items-center">
-                <div>
-                    <div class="text-xs font-bold text-slate-500 uppercase tracking-wider">Project: <span id="displayClientName" class="text-blue-900"></span></div>
-                    <div class="text-xs text-gray-400" id="progressText">0% Complete</div>
-                </div>
-                <div class="w-1/3 bg-gray-200 rounded-full h-2">
-                    <div id="progressBar" class="bg-blue-900 h-2 rounded-full transition-all duration-500" style="width: 0%"></div>
-                </div>
-            </div>
-
-            <div id="questions-container" class="space-y-10 pb-24"></div>
-
-            <div class="fixed bottom-6 right-6 md:bottom-12 md:right-12 z-40">
-                <button onclick="finishEvaluation()" id="finishBtn" class="hidden btn-primary px-8 py-4 rounded-full font-bold shadow-2xl hover:scale-110 transform transition-all flex items-center gap-3 border-2 border-white ring-4 ring-black/10">
-                    <span>Submit & Generate Report</span>
-                    <i class="fas fa-check-circle"></i>
-                </button>
-            </div>
-        </div>
-
-        <div id="screen-results" class="hidden space-y-8 animate-fade-in">
-            <div class="flex flex-col md:flex-row justify-between items-center gap-4 bg-green-50 p-4 rounded-lg border border-green-200">
-                <div class="flex items-center gap-3">
-                    <i class="fas fa-cloud-upload-alt text-green-600 text-xl"></i>
-                    <div>
-                        <h3 class="font-bold text-green-800">Results Saved Successfully</h3>
-                        <p class="text-xs text-green-600">Data has been uploaded to the Lynnerup & Ansell secure database.</p>
-                    </div>
-                </div>
-                <button onclick="location.reload()" class="text-green-700 hover:text-green-900 font-bold text-sm underline">Start New</button>
-            </div>
-
-            <div class="bg-white rounded-2xl shadow-xl p-4 md:p-8 border border-slate-100">
-                <h3 class="text-lg font-bold text-slate-700 mb-6 border-b pb-4">Strategic Alignment Profile</h3>
-                <div class="chart-container flex justify-center">
-                    <canvas id="radarChart"></canvas>
-                </div>
-            </div>
-
-            <div class="bg-white rounded-2xl shadow-xl p-6 md:p-8 border border-slate-100 overflow-hidden">
-                <div class="flex justify-between items-center mb-6">
-                    <h3 class="text-lg font-bold text-slate-700">Detailed Scoring</h3>
-                    <button onclick="downloadCSV()" class="bg-gray-100 hover:bg-gray-200 text-gray-700 px-4 py-2 rounded-lg font-medium text-sm flex items-center gap-2">
-                        <i class="fas fa-download"></i> Download Local Copy
-                    </button>
-                </div>
-                <div class="overflow-x-auto">
-                    <table class="min-w-full text-sm text-left text-gray-500">
-                        <thead class="text-xs text-slate-700 uppercase bg-slate-50 border-b">
-                            <tr>
-                                <th class="px-6 py-4">Category</th>
-                                <th class="px-6 py-4">Sub-Component</th>
-                                <th class="px-6 py-4 text-center">Score</th>
-                            </tr>
-                        </thead>
-                        <tbody id="resultsTableBody" class="divide-y divide-gray-100"></tbody>
-                    </table>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <script>
-        // ==========================================
-        // --- CONFIGURATION (EDIT THIS SECTION) ---
-        // ==========================================
-        
-        // 1. Paste your Google Apps Script Web App URL inside the quotes:
-        const GOOGLE_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbxzQeyM6GGP9q1f1SxBx-TEsBX3ASFTKH3Ug4aAHUwkUXiqrrKwd9jb2oJJLKlSjBf6bQ/exec'; 
-
-        // 2. Paste your FULL CSV content inside the backticks below:
-        const RUBRIC_CSV = `Component,Sub-Component,Score 1,Score 2,Score 3,Score 4,Score 5
-Outcome and Process Metrics,Clear definition and documentation of outcome metrics,No clear definition or documentation of outcome metrics.,"Few outcome metrics are defined, and documentation is incomplete.",Outcome metrics are partially defined but lack clarity or alignment with goals.,"Most outcome metrics are well-defined, with some minor gaps in documentation.","All outcome metrics are clearly defined, documented, and aligned with institutional goals."
-Outcome and Process Metrics,Comprehensive tracking of both student success and institutional process metrics,No tracking of student success or process metrics.,Minimal tracking of metrics; data is outdated or rarely reviewed.,Tracking exists but lacks consistency and integration into decision-making.,"Metrics are tracked, but some data or processes are not regularly analyzed.","Both types of metrics are comprehensively tracked, analyzed, and integrated into decision-making."
-Outcome and Process Metrics,Availability and ease of access to real-time data,No access to real-time data.,Limited availability of real-time data; not regularly updated.,Real-time data is available but requires specific access or technical expertise.,Real-time data is available but not easily accessible to all.,Real-time data on metrics is easily accessible to all stakeholders.
-Outcome and Process Metrics,Regular review and updating of metrics,No review or updates of metrics tree,Little to no review or updates of metrics tree,"Review is infrequent, and updates are made on an ad-hoc basis.",Metrics are reviewed frequently but updated irregularly.,"Metrics are reviewed and updated regularly (e.g., quarterly) based on institutional changes and goals."
-Outcome and Process Metrics,Institutional-wide integration of metrics into executive and board's decision-making,Metrics are not used in institutional decision-making.,Metrics are only occasionally referenced in decision-making.,"Some departments use metrics, but there is no institution-wide integration.",Metrics are integrated into decision-making but not consistently across all departments.,Metrics are fully integrated across all departments and consistently guide strategic decisions.
-Understanding the Drivers of Outcomes,Identification and documentation of the primary factors influencing student outcomes,No identification or documentation of key drivers.,"Few key drivers are identified, and there is little documentation.",Key drivers are partially identified but not fully documented or understood.,"Most key drivers are identified and documented, but there are gaps in understanding.","All key drivers are identified, documented, and understood across the institution."
-Understanding the Drivers of Outcomes,Evidence of data-driven decisions based on identified drivers,No evidence of data-driven decisions based on key drivers.,"Few decisions are based on data, with little consideration of key drivers.","Some data-driven decisions are made, but they are not consistent or systematic.",Data-driven decisions are made frequently but not always directly linked to key drivers.,"Data-driven decisions are regularly made, with clear evidence linking decisions to key drivers."
-Understanding the Drivers of Outcomes,Use of data analytics to predict future outcomes based on current drivers,No use of data analytics to predict future outcomes.,Minimal use of data analytics; predictions are rare or unreliable.,"Some data analytics are used, but the process is not systematic.","Data analytics are used, but the predictions are not consistently accurate.",Advanced data analytics are used to consistently predict outcomes and adjust strategies.
-Understanding the Drivers of Outcomes,Periodic cross-functional review and updating of outcome drivers,No review or updating of outcome drivers.,Outcome drivers are rarely reviewed or updated.,"Reviews are irregular, and updates are made reactively.",Outcome drivers are reviewed but not consistently updated.,"Outcome drivers are reviewed and updated on a regular, scheduled basis."
-Disciplined Implementation of Improvement Actions,"A structured, organization-wide plan for implementing improvement actions",No structured plan for implementing improvement actions.,Improvement actions are implemented ad-hoc with minimal planning.,"A plan exists, but it is incomplete or inconsistently applied.",A structured plan is in place but not fully implemented across all departments.,"A comprehensive, structured plan exists and is consistently followed across the organization."
-Disciplined Implementation of Improvement Actions,Accountability mechanisms at all levels to monitor progress,No accountability mechanisms in place.,Little accountability for progress on improvement actions.,"Some accountability exists, but monitoring is sporadic.",Accountability mechanisms exist but are not consistently enforced.,"Clear accountability structures exist, with regular monitoring and reporting."
-Disciplined Implementation of Improvement Actions,Allocation of necessary resources to support improvement actions,No resources are allocated to support improvement actions.,"Minimal resources are allocated, limiting the impact of improvement actions.","Resources are allocated on an ad-hoc basis, often insufficient.",Resources are allocated but not always sufficient to meet needs.,"Resources (staff, funding, time) are consistently allocated to support improvement efforts."
-Disciplined Implementation of Improvement Actions,Use of feedback loops for continuous refinement,No feedback loops in place for refining improvement actions.,"Minimal feedback is collected, and refinement is rare.","Feedback is sporadically collected, with limited refinement of actions.",Feedback is collected but not consistently used for refinement.,Continuous feedback is collected and used to refine improvement actions in real-time.
-Disciplined Implementation of Improvement Actions,Transparent communication of progress on improvement actions,No communication of progress on improvement actions.,"Little communication of progress, leading to a lack of transparency.",Communication of progress is irregular or limited to certain groups.,Progress is communicated but not consistently or transparently to all stakeholders.,Progress on improvement actions is communicated transparently to all stakeholders.
-Training,"Regular provision of training programs for all staff, specifically focused on performance dialogues and root-cause problem solving",No formal training programs are in place.,"Minimal training is offered, and not all staff have access.",Training is available but inconsistent in frequency or reach.,Training programs are available but not offered to all staff or on a regular basis.,Comprehensive training programs are offered regularly to all staff.
-Training,Integration of standard problem-solving methodologies in the training,No problem-solving methodologies are included in training.,Limited mention of problem-solving methodologies in training.,"Problem-solving methodologies are mentioned, but not fully integrated into training.","Most training programs include problem-solving methodologies, but not comprehensively.","All training programs include thorough instruction on problem-solving methodologies (e.g., Lean, Six Sigma)."
-Training,Participation rates in training programs,Very minimal or no participation in training programs.,Low participation rates (less than 50%).,"Moderate participation (50-75%), with some departments underrepresented.",Participation rates are strong (75-90%) but vary between departments.,High participation rates (over 90%) across all departments.
-Training,Application of skills learned in training,No evidence that training is being applied in the workplace.,Little evidence of skills learned being applied in practice.,"Skills are applied sporadically, with inconsistent results.","Most skills are applied, but some gaps remain in certain areas.",Skills learned in training are regularly applied and visible in daily operations.
-Training,Evaluation of training programs’ impact,No evaluation of training program impact.,Minimal evaluation of training programs.,"Some evaluation is conducted, but the process is informal and inconsistent.","Training programs are evaluated, but follow-up improvements are infrequent.",The impact of training is regularly evaluated and leads to continuous improvement of the programs.
-Infrastructure,Availability and user-friendliness of dashboards and tools,No dashboards or tools are available.,Dashboards are available but not widely used due to accessibility or usability concerns.,Dashboards exist but have significant usability issues or limited access.,Dashboards are available but may not be fully optimized for ease of use.,Dashboards are readily available and highly user-friendly for all stakeholders.
-Infrastructure,Accuracy and timeliness of data presented,No relevant data is presented or used.,Data is outdated and rarely accurate.,Data is occasionally inaccurate or outdated.,Data is accurate but may have slight delays in updates.,"Data is consistently accurate, updated in real-time, and used by all stakeholders."
-Infrastructure,Customization of dashboards to meet departmental needs,No customization of dashboards is possible.,"Dashboards are generic, with no customization available.",Limited customization options are available for dashboards.,"Some customization is available, but not all departments have tailored dashboards.",Dashboards are fully customizable and tailored to the specific needs of each department.
-Infrastructure,Capacity of dashboard infrastructure to scale,No capacity for scalability.,Infrastructure struggles to scale and faces regular performance issues.,Limited scalability; the infrastructure may not handle significant growth.,Infrastructure can scale but may require additional resources or adjustments.,"Infrastructure is highly scalable, allowing for growth in usage and complexity."
-Performance dialogues,"Frequency and consistency of performance dialogues, from frontline to governing board",No formal performance dialogues in place.,Rare performance dialogues occur without regularity.,dialogues occur but are infrequent or inconsistent across the organization.,dialogues are frequent but may vary in consistency between departments.,Performance dialogues occur frequently and consistently across all levels of the organization.
-Performance dialogues,Active participation in performance dialogues,No participation in performance dialogues.,Few staff participate in performance dialogues.,"Participation is inconsistent, with only some departments engaged.","Most staff and leadership participate, with occasional absences.",All staff and leadership actively participate in performance dialogues.
-Performance dialogues,Use of data in performance dialogues,No data is used during dialogues.,Data is rarely used in performance dialogues.,Data is referenced occasionally but is not central to discussions.,Data is used in most dialogues but not consistently in every meeting.,"Data is central to every performance dialog, driving decisions and actions."
-Performance dialogues,"Alignment of mission, objectives, and institutional metrics",No alignment between goals and institutional metrics.,Limited alignment of goals with institutional metrics.,Some alignment exists but is inconsistent across departments.,Goals are mostly aligned but with some gaps in certain areas.,Individual and department goals are fully aligned with institutional performance metrics.
-Performance dialogues,Documentation and follow-up on action items,No documentation or follow-up on action items.,Little documentation or follow-up on action items.,"Action items are documented sporadically, with minimal follow-up.","Action items are documented, but follow-up is inconsistent.","Action items are well-documented, and follow-up is systematic and thorough."
-Role-Modeling,"Leaders’ regular use of performance management tools (dashboard, structured agendas, etc.)",Leaders do not use performance management tools.,Leaders rarely use performance management tools.,Leaders use tools occasionally but not as a regular part of their workflow.,Leaders frequently use tools but not consistently across all situations.,Leaders consistently use tools in everyday decision-making and communication.
-Role-Modeling,Visibility of role-modeling behaviors,No role-modeling behaviors are evident.,Little visibility of role-modeling behaviors.,"Some leaders exhibit role-modeling behaviors, but it’s not widespread.",Role-modeling is visible in most leaders but may be inconsistent.,Role-modeling behaviors are highly visible across all levels of leadership.
-Role-Modeling,Encouragement from leadership to engage in performance dialogues,No encouragement from leadership.,Minimal encouragement from leadership.,Occasional encouragement is given but lacks follow-through.,Leaders provide some encouragement but are not consistent.,Leadership actively encourages and supports staff engagement in performance management.
-Role-Modeling,Incentives or recognition for contributing to improvements,No recognition or incentive system.,Little recognition or incentive for contributions.,Some informal recognition but no formal system in place.,Recognition or incentives are available but not regularly applied.,Regular and formal recognition or incentives for staff who contribute to performance improvements.
-Role-Modeling,Adoption rates of performance management practices by staff,No adoption of performance management practices.,Low adoption rates of performance management practices.,"Moderate adoption of practices, with some departments lagging.",Adoption rates are strong but vary between departments.,"High adoption rates across all departments, driven by leadership’s example."
-HR Implications,"Link between performance management and HR outcomes (e.g., promotion, raises, rewards, etc.)",No link between performance management and HR outcomes.,Minimal connection between performance management and HR outcomes.,The link is occasionally made but lacks consistency.,A link exists but may not be uniformly applied across all areas.,"Strong, clear linkage between performance management engagement and HR outcomes (promotions, raises)."
-HR Implications,Integration of performance metrics into employee evaluations,No performance metrics used in employee evaluations.,Little use of performance metrics in evaluations.,Some metrics are referenced in evaluations but not central to the process.,Metrics are used in evaluations but may not be consistently applied.,Performance metrics are a key part of employee evaluations and development plans.
-HR Implications,Communication of expectations during recruitment,No communication of performance management expectations during recruitment.,Minimal communication of performance expectations during recruitment.,"Some communication of expectations occurs during recruitment, but it’s unclear or inconsistent.",Expectations are communicated during recruitment but may not be consistently reinforced during onboarding.,"Performance management expectations are clearly communicated during recruitment and onboarding, with regular follow-up."
-HR Implications,Recognition systems,No recognition or reward system in place.,Little to no formal recognition or reward for contributions.,Informal recognition occurs but lacks a structured reward system.,Recognition and reward systems are in place but may not be consistently applied across all departments.,"A formal, well-defined recognition and reward system is in place, with frequent acknowledgment of contributions to performance improvements."
-Rapid Escalation and Resolution,Mechanisms in place for escalating issues from the frontline,No formal mechanisms for issue escalation.,Minimal mechanisms for escalation; issues are often resolved informally.,"Some mechanisms are in place, but they are inconsistently applied or poorly communicated.",Mechanisms exist but may not be fully understood or utilized by all staff.,"Clear, formal mechanisms for rapid escalation of issues exist, with well-defined processes for frontline staff to follow."
-Rapid Escalation and Resolution,Timeliness and effectiveness of responses to escalated issues,Issues are rarely addressed in a timely or effective manner.,"Issues are often delayed or unresolved, with minimal attention.","Responses to issues are inconsistent, with some delays and mixed effectiveness.","Issues are usually addressed timely, but some may experience delays or suboptimal resolutions.","Issues are consistently addressed in a timely manner, with effective resolutions."
-Rapid Escalation and Resolution,Empowerment of frontline staff to raise concerns,Frontline staff are not empowered to raise concerns.,"Few staff feel empowered to raise concerns, with minimal support structures.","Some staff feel empowered, but barriers remain for others.",Most staff feel empowered but may hesitate in certain situations due to unclear processes.,"Frontline staff feel fully empowered to raise concerns, with a strong culture of support."
-Rapid Escalation and Resolution,Clarity in the process for escalating and resolving operational challenges,No formal process for escalation is in place.,"Minimal clarity in the process, with staff often unsure of how to escalate issues.",The process exists but lacks clarity and is inconsistently communicated.,"The process is somewhat clear, but there may be occasional confusion or gaps in documentation.","The escalation process is clear and well-documented, with staff understanding how to raise and resolve challenges."
-Rapid Escalation and Resolution,Documentation and transparency of resolutions,No documentation or communication of issue resolution.,"Minimal documentation of issues and resolutions, with little transparency.","Documentation of resolutions is sporadic, with inconsistent communication to staff.","Most issues are documented, but some gaps exist in transparency or communication.","All escalated issues are thoroughly documented, and the resolutions are transparently communicated to all stakeholders."
-Problem-Solving,"Application of standard problem-solving methodologies (e.g., Lean, Six Sigma)",No application of standard problem-solving methodologies.,Minimal use of structured problem-solving methodologies.,Problem-solving tools are used occasionally but not systematically.,Methodologies are applied frequently but may not be fully integrated into all processes.,"Problem-solving methodologies are applied consistently across all departments, with visible results."
-Problem-Solving,Cross-functional collaboration in addressing performance gaps,No cross-functional collaboration in place.,Minimal collaboration across functions to address performance gaps.,"Collaboration happens sporadically, with limited cross-functional involvement.",Collaboration occurs but is not fully systematic or frequent.,"Cross-functional teams regularly collaborate to address gaps and improve performance, leading to visible improvements."
-Problem-Solving,Use of root-cause analysis to resolve operational inefficiencies,No use of root-cause analysis in problem-solving efforts.,"Minimal use of root-cause analysis, leading to temporary fixes.",Root-cause analysis is applied occasionally but not systematically or effectively.,Root-cause analysis is used frequently but may not always address the underlying issues.,"Root-cause analysis is consistently applied, resulting in effective long-term resolutions to inefficiencies."
-Problem-Solving,Sustainability of improvements made through problem-solving,No sustainable improvements are made through problem-solving.,"Improvements are rarely sustainable, requiring frequent revisits.",Improvements are made but often require follow-up to sustain them.,"Improvements are mostly sustainable, with occasional need for further adjustments.",Improvements made through problem-solving efforts are sustainable and lead to long-term gains.
-`;
-
-        // ==========================================
-        // --- END CONFIGURATION -------------------
-        // ==========================================
-
-        let rubricData = {}; 
-        let userScores = {}; 
-        let totalQuestions = 0;
-        let clientName = "";
-
-        // Core App Logic
-        function startEvaluation() {
-            const name = document.getElementById('clientNameInput').value.trim();
-            if(!name) { alert("Please enter a Client or Project Name."); return; }
-            
-            clientName = name;
-            document.getElementById('displayClientName').innerText = clientName;
-            
-            if(RUBRIC_CSV.includes("PASTE_YOUR_CSV")) {
-                alert("Configuration Error: Please edit the index.html file and paste your CSV data in the CONFIGURATION section.");
-                return;
-            }
-
-            try {
-                parseCSV(RUBRIC_CSV);
-                document.getElementById('screen-welcome').classList.add('hidden');
-                document.getElementById('screen-app').classList.remove('hidden');
-                window.scrollTo(0,0);
-            } catch(e) {
-                alert("Error loading CSV data. Please check the file format.");
-                console.error(e);
-            }
-        }
-
-        // CSV Parser
-        function parseCSV(text) {
-            // Simple robust parser
-            const rows = [];
-            let currentRow = [];
-            let currentVal = '';
-            let insideQuote = false;
-            
-            for (let i = 0; i < text.length; i++) {
-                const char = text[i];
-                if (char === '"' && text[i+1] === '"') { currentVal += '"'; i++; }
-                else if (char === '"') { insideQuote = !insideQuote; }
-                else if (char === ',' && !insideQuote) { currentRow.push(currentVal.trim()); currentVal = ''; }
-                else if ((char === '\n' || char === '\r') && !insideQuote) {
-                    if(currentVal || currentRow.length) currentRow.push(currentVal.trim());
-                    if(currentRow.length) rows.push(currentRow);
-                    currentRow = []; currentVal = '';
-                } else { currentVal += char; }
-            }
-            if(currentVal || currentRow.length) { currentRow.push(currentVal.trim()); rows.push(currentRow); }
-
-            // Process Rows
-            const headers = rows[0].map(h => h.toLowerCase());
-            const colCat = headers.findIndex(h => h.includes('component') && !h.includes('sub'));
-            const colSub = headers.findIndex(h => h.includes('sub-component'));
-            const colS1 = headers.findIndex(h => h.includes('score 1'));
-
-            rubricData = {};
-            totalQuestions = 0;
-
-            for(let i=1; i<rows.length; i++) {
-                const row = rows[i];
-                if(row.length < 2) continue;
-                const cat = row[colCat];
-                const q = row[colSub];
-                if(!cat || !q) continue;
-
-                if(!rubricData[cat]) rubricData[cat] = [];
-                
-                const scores = {};
-                for(let s=1; s<=5; s++) {
-                    scores[s] = (colS1 !== -1 && row[colS1 + s -1]) ? row[colS1 + s -1] : row[2+s-1] || "";
-                }
-                
-                rubricData[cat].push({ text: q, scores: scores });
-                totalQuestions++;
-            }
-            renderForm();
-        }
-
-        function renderForm() {
-            const container = document.getElementById('questions-container');
-            container.innerHTML = '';
-            
-            Object.keys(rubricData).forEach((cat, idx) => {
-                const header = document.createElement('div');
-                header.className = "bg-white p-4 rounded-lg shadow-sm border-l-4 border-blue-900 mt-10 mb-6";
-                header.innerHTML = `<h2 class="text-xl font-bold text-slate-800 uppercase">${cat}</h2>`;
-                container.appendChild(header);
-
-                rubricData[cat].forEach((q, qIdx) => {
-                    const qId = `q-${idx}-${qIdx}`;
-                    const card = document.createElement('div');
-                    card.className = "bg-white p-6 rounded-xl shadow-sm border border-gray-100 hover:shadow-md transition-all";
-                    
-                    let btns = '';
-                    for(let i=1; i<=5; i++) {
-                        btns += `
-                            <button onclick="setScore('${q.text.replace(/'/g, "\\'")}', ${i}, '${qId}')" 
-                                id="${qId}-opt-${i}"
-                                class="score-btn flex-1 border border-gray-200 rounded-lg p-2 hover:bg-blue-50 transition-all flex flex-col items-center justify-start h-full group">
-                                <span class="text-lg font-bold mb-1 text-gray-300 group-hover:text-blue-600">${i}</span>
-                                <span class="text-[10px] leading-tight text-gray-500 group-hover:text-blue-800 text-center line-clamp-4">${q.scores[i]}</span>
-                            </button>`;
-                    }
-                    card.innerHTML = `<p class="font-medium text-slate-700 mb-4">${q.text}</p><div class="grid grid-cols-5 gap-2 h-32 items-stretch">${btns}</div>`;
-                    container.appendChild(card);
-                });
-            });
-        }
-
-        function setScore(q, s, id) {
-            userScores[q] = s;
-            for(let i=1; i<=5; i++) document.getElementById(`${id}-opt-${i}`).classList.remove('selected');
-            document.getElementById(`${id}-opt-${s}`).classList.add('selected');
-            
-            const count = Object.keys(userScores).length;
-            const pct = Math.round((count/totalQuestions)*100);
-            document.getElementById('progressBar').style.width = `${pct}%`;
-            document.getElementById('progressText').innerText = `${pct}% Complete`;
-            if(count === totalQuestions) document.getElementById('finishBtn').classList.remove('hidden');
-        }
-
-        function finishEvaluation() {
-            // 1. Change UI to loading state
-            const btn = document.getElementById('finishBtn');
-            const originalText = btn.innerHTML;
-            btn.innerHTML = `<i class="fas fa-spinner fa-spin"></i> Uploading...`;
-            btn.disabled = true;
-
-            // 2. Prepare Data
-            const payload = {
-                clientName: clientName,
-                answers: []
-            };
-            
-            // Calc stats for local view
-            const catStats = {};
-            const catCounts = {};
-
-            Object.keys(rubricData).forEach(cat => {
-                rubricData[cat].forEach(q => {
-                    if(userScores[q.text]) {
-                        payload.answers.push({
-                            category: cat,
-                            question: q.text,
-                            score: userScores[q.text]
-                        });
-                        
-                        // Local stats
-                        catStats[cat] = (catStats[cat] || 0) + userScores[q.text];
-                        catCounts[cat] = (catCounts[cat] || 0) + 1;
-                    }
-                });
-            });
-
-            // 3. Send to Google Sheets
-            if(GOOGLE_SCRIPT_URL) {
-                fetch(GOOGLE_SCRIPT_URL, {
-                    method: "POST",
-                    mode: "no-cors", // Standard for simple Apps Script submission
-                    headers: { "Content-Type": "text/plain" },
-                    body: JSON.stringify(payload)
-                }).then(() => {
-                    console.log("Uploaded");
-                    showResults(catStats, catCounts);
-                }).catch(err => {
-                    alert("Network error saving to database. Local results will still be shown.");
-                    showResults(catStats, catCounts);
-                });
-            } else {
-                // If no URL configured, just show results
-                setTimeout(() => showResults(catStats, catCounts), 1000);
-            }
-        }
-
-        function showResults(stats, counts) {
-            document.getElementById('screen-app').classList.add('hidden');
-            document.getElementById('screen-results').classList.remove('hidden');
-            window.scrollTo(0,0);
-
-            // Prepare Chart Data
-            const labels = [];
-            const data = [];
-            Object.keys(stats).forEach(cat => {
-                labels.push(cat.substring(0,15) + (cat.length>15?'...':''));
-                data.push(counts[cat] ? (stats[cat]/counts[cat]).toFixed(2) : 0);
-            });
-
-            // Render Chart
-            new Chart(document.getElementById('radarChart'), {
-                type: 'radar',
-                data: {
-                    labels: labels,
-                    datasets: [{
-                        label: 'Score',
-                        data: data,
-                        backgroundColor: 'rgba(30, 58, 138, 0.2)',
-                        borderColor: '#1e3a8a',
-                        pointBackgroundColor: '#d97706',
-                        borderWidth: 2
-                    }]
-                },
-                options: { scales: { r: { suggestedMin: 0, suggestedMax: 5, ticks: { stepSize: 1 } } } }
-            });
-
-            // Render Table
-            const tbody = document.getElementById('resultsTableBody');
-            tbody.innerHTML = '';
-            Object.keys(rubricData).forEach(cat => {
-                rubricData[cat].forEach(q => {
-                    const s = userScores[q.text];
-                    const tr = document.createElement('tr');
-                    tr.className = "hover:bg-slate-50";
-                    tr.innerHTML = `<td class="px-6 py-4 font-medium">${cat}</td><td class="px-6 py-4 text-slate-600">${q.text}</td><td class="px-6 py-4 text-center font-bold text-blue-900">${s}</td>`;
-                    tbody.appendChild(tr);
-                });
-            });
-        }
-
-        function downloadCSV() {
-            const rows = [["Category", "Sub-Component", "Score"]];
-            Object.keys(rubricData).forEach(cat => {
-                rubricData[cat].forEach(q => {
-                    rows.push([`"${cat}"`, `"${q.text}"`, userScores[q.text]||'']);
-                });
-            });
-            const link = document.createElement("a");
-            link.href = "data:text/csv;charset=utf-8," + encodeURI(rows.map(e => e.join(",")).join("\n"));
-            link.download = `Results_${clientName}.csv`;
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-        }
-    </script>
-</body>
-</html>
-
+  try {
+    const response = UrlFetchApp.fetch(url, options);
+    const json = JSON.parse(response.getContentText());
+    return json.candidates[0].content.parts[0].text;
+  } catch (e) {
+    return "Unable to generate analysis at this time. Please rely on the data visualization.";
+  }
+}
