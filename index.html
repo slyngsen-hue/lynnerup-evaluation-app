@@ -334,7 +334,10 @@ Problem-Solving,Sustainability of improvements made through problem-solving,No s
                                 <span class="text-[10px] leading-tight text-gray-500 group-hover:text-blue-800 text-center line-clamp-4">${q.scores[i]}</span>
                             </button>`;
                     }
-                    card.innerHTML = `<p class="font-medium text-slate-700 mb-4">${q.text}</p><div class="grid grid-cols-5 gap-2 h-32 items-stretch">${btns}</div>`;
+card.innerHTML = `<p class="font-medium text-slate-700 mb-4">${q.text}</p>
+<div class="grid grid-cols-1 md:grid-cols-5 gap-2 h-auto md:h-32 items-stretch">
+    ${btns}
+</div>`;
                     container.appendChild(card);
                 });
             });
@@ -489,6 +492,7 @@ Problem-Solving,Sustainability of improvements made through problem-solving,No s
     </script>
 </body>
 </html>
+
 
 
 
